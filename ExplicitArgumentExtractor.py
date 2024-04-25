@@ -1,15 +1,19 @@
-import os
-import re
-import sys
-import time
-import numpy
-import string
+# -*- coding: utf-8 -*-
+
 import codecs
 import configparser
 import dill as pickle
-from nltk.tree import ParentedTree
-from nltk.parse import stanford
+import os
+import re
+import string
+import sys
+import time
 from collections import defaultdict
+
+import numpy
+import stanza
+from nltk.tree import ParentedTree
+from nltk.tree.tree import Tree
 from sklearn.ensemble import RandomForestClassifier
 
 # custom modules
@@ -22,13 +26,14 @@ class ExplicitArgumentExtractor:
     def __init__(self):
         self.config = configparser.ConfigParser()
         self.config.read('config.ini')
-        os.environ['JAVAHOME'] = self.config['lexparser']['javahome']
-        os.environ['STANFORD_PARSER'] = self.config['lexparser']['parserdir']
-        os.environ['STANFORD_MODELS'] = self.config['lexparser']['parserdir']
-        os.environ['CLASSPATH'] = '%s/stanford-parser.jar' % self.config['lexparser']['parserdir']
-        self.lexparser = stanford.StanfordParser(model_path='edu/stanford/nlp/models/lexparser/germanPCFG.ser.gz')
+        self.nlp = stanza.Pipeline(lang='de',
+                                   processors='tokenize,pos,mwt,constituency',
+                                   package='default_accurate',
+                                   tokenize_pretokenized=True,
+                                   download_method=None)
         if os.path.exists(os.path.join(os.getcwd(), 'pcc_memorymap.pickle')):
-            self.parsermap = pickle.load(codecs.open(os.path.join(os.getcwd(), 'pcc_memorymap.pickle'), 'rb'))
+            self.parsermap = pickle.load(codecs.open(
+                os.path.join(os.getcwd(), 'pcc_memorymap.pickle'), 'rb'))
         else:
             self.parsermap = {}
 
@@ -44,30 +49,32 @@ class ExplicitArgumentExtractor:
             self.labeldecodict[self.maxencid] = val
             self.maxencid += 1
             return self.labelencodict[val]
-            
+
     def decode(self, val):
         return self.labeldecodict[val]
 
-        
     def getIntArg(self, tree, rel, tokens):
 
         refcon = rel.connective[0]
         leavenr = utils.getLeaveNr(refcon, tree)
-        
+
         refconpos = tree.leaf_treeposition(leavenr)
         connnode = tree[refconpos[:-1]]
         refcontype = connnode.label()
-
+        # print(refcontype)
+        # TODO check these
         plain_tokens = []
-        if refcontype == 'KON':
+        if refcontype == 'CCONJ':
             plain_tokens = utils.get_right_sibling(tree, leavenr, refcon)
-        elif refcontype == 'PROAV' or refcontype.startswith('A') or refcontype.startswith('K'):
-            plain_tokens = utils.get_parent_phrase_plus_phrase_after_comma(tree, leavenr, ['S', 'CS', 'VP'], refcon)
+        elif refcontype == 'ADV' or refcontype == 'SCONJ':
+            plain_tokens = utils.get_parent_phrase_plus_phrase_after_comma(
+                tree, leavenr, ['S', 'CS', 'VP'], refcon)
         else:
-            plain_tokens = utils.get_parent_phrase(tree, leavenr, ['S', 'CS', 'VP'], refcon)
-            
-            
-        # because arg finding uses NLTK tree and positions may be off due to brackets etc., getting back on track with actual Tokens here:
+            plain_tokens = utils.get_parent_phrase(tree, leavenr,
+                                                   ['S', 'CS', 'VP'], refcon)
+
+        # because arg finding uses NLTK tree and positions may be off
+        # due to brackets etc., getting back on track with actual Tokens here:
         id2token = {}
         intargtokens = []
         for i3, j3 in enumerate(refcon.fullSentence.split()):
@@ -75,68 +82,94 @@ class ExplicitArgumentExtractor:
             tokenId = refcon.tokenId - diff
             id2token[tokenId] = j3
         intargtokens = utils.matchPlainTokensWithIds(plain_tokens, id2token)
-        if not intargtokens: # stupid bracket replacing in nltk...
+        if not intargtokens:  # stupid bracket replacing in nltk...
             replain_tokens = utils.bracketreplace(plain_tokens)
-            intargtokens = utils.matchPlainTokensWithIds(replain_tokens, id2token)
-        
+            intargtokens = utils.matchPlainTokensWithIds(replain_tokens,
+                                                         id2token)
+
         # excluding the connective token(s) from intarg:
-        intargtokens = [x for x in intargtokens if not x in [y.tokenId for y in rel.connective]]
-        # in PCC, intarg is what comes after second item for discont conns. Guess this is a relatively arbitrary decision.
+        intargtokens = [x for x in intargtokens
+                        if x not in [y.tokenId for y in rel.connective]]
+        # in PCC, intarg is what comes after second item for discont conns.
+        # Guess this is a relatively arbitrary decision.
         if not utils.iscontinuous([x.tokenId for x in rel.connective]):
-            intargtokens = [x for x in intargtokens if x > rel.connective[-1].tokenId]
-        # highly arbitrary as well, but in the PCC, final punctuation signs are part of intarg
+            intargtokens = [x for x in intargtokens
+                            if x > rel.connective[-1].tokenId]
+        # highly arbitrary as well, but in the PCC, final punctuation
+        # signs are part of intarg
         if intargtokens:
             if intargtokens[-1] < len(tokens)-1:
                 if tokens[intargtokens[-1]+1].token in string.punctuation:
                     intargtokens.append(tokens[intargtokens[-1]+1].tokenId)
 
-
         return intargtokens
-
 
     def getExtArg(self, tree, rel, tokens, sents):
 
         refcon = rel.connective[0]
-        leavenr = utils.getLeaveNr(refcon, tree)
-        
+
         postag = tree.pos()[refcon.sentenceTokenId][1]
-        ln = 'SOS' if refcon.sentenceTokenId == 0 else tree.pos()[refcon.sentenceTokenId-1][0]
-        rn = 'EOS' if refcon.sentenceTokenId == len(tree.pos()) else tree.pos()[refcon.sentenceTokenId+1][0]
-        lnpos = 'SOS' if refcon.sentenceTokenId == 0 else tree.pos()[refcon.sentenceTokenId-1][1]
-        rnpos = 'EOS' if refcon.sentenceTokenId == len(tree.pos()) else tree.pos()[refcon.sentenceTokenId+1][1]
+        ln = 'SOS' if refcon.sentenceTokenId == 0\
+            else tree.pos()[refcon.sentenceTokenId-1][0]
+        rn = 'EOS' if refcon.sentenceTokenId == len(tree.pos())\
+            else tree.pos()[refcon.sentenceTokenId+1][0]
+        lnpos = 'SOS' if refcon.sentenceTokenId == 0\
+            else tree.pos()[refcon.sentenceTokenId-1][1]
+        rnpos = 'EOS' if refcon.sentenceTokenId == len(tree.pos())\
+            else tree.pos()[refcon.sentenceTokenId+1][1]
         nodePosition = tree.leaf_treeposition(refcon.sentenceTokenId)
         parent = tree[nodePosition[:-1]].parent()
         rootroute = utils.getPathToRoot(parent, [])
-        feat = [' '.join([x.token for x in rel.connective]), postag, ln, rn, lnpos, rnpos, '-'.join(rootroute), refcon.sentenceTokenId]
+        feat = [' '.join([x.token for x in rel.connective]), postag, ln, rn,
+                lnpos, rnpos, '-'.join(rootroute), refcon.sentenceTokenId]
         enc_feat = [self.encode(v) for v in feat]
-        
-        relative_position = self.sentposclf.predict(numpy.array(enc_feat).reshape(1, -1))
 
-        # the way this works is that first all tokens from the predicted sentenceId are taken. Then, if extarg is predicted to be in the same sent, more restrictive filtering is applied below. After intarg has been extracted, both are filtered against each other again.
+        relative_position = self.sentposclf.predict(
+            numpy.array(enc_feat).reshape(1, -1))
+
+        # the way this works is that first all tokens from the
+        # predicted sentenceId are taken. Then, if extarg is predicted
+        # to be in the same sent, more restrictive filtering is applied
+        # below. After intarg has been extracted, both are filtered
+        # against each other again.
         temparg = []
         targetsid = refcon.sentenceId + relative_position[0]
         if targetsid in sents:
             for token in sents[targetsid]:
                 temparg.append(token.tokenId)
-        """
-        # the following is a more precise approach. Found, though, that just taking the entire predicted sentence (as per a few lines above) results in higher scores on the PCC. Later on, filtering with intarg tokens is done anyway, such that extarg is the mirror image of intarg (if both are in the same sentence).
+        '''
+        # the following is a more precise approach. Found, though, that
+        just taking the entire predicted sentence (as per a few lines
+        above) results in higher scores on the PCC. Later on, filtering
+        with intarg tokens is done anyway, such that extarg is the
+        mirror image of intarg (if both are in the same sentence).
         if relative_position == 0:
-            samesentpos = self.samesentclf.predict(numpy.array(enc_feat).reshape(1, -1))
+            samesentpos = self.samesentclf.predict(
+                numpy.array(enc_feat).reshape(1, -1))
             if samesentpos[0] == 1: # extarg is predicted after (ref)conn
-                # above, already the entire sent is taken by default, and filtered here, and against intarg later. This sct is a bit more restrictive and only takes the bit to the left/right (depending on samesentclf prediction) in the same S, CS or VP. May want to take out VP later if recall is too low. Or take right sibling (of the parent node) as well.
+                # above, already the entire sent is taken by default,
+                and filtered here, and against intarg later. This sct is
+                a bit more restrictive and only takes the bit to the
+                left/right (depending on samesentclf prediction) in the
+                same S, CS or VP. May want to take out VP later if
+                recall is too low. Or take right sibling (of the parent
+                node) as well.
                 labels = ['S', 'CS', 'VP']
                 for i, node in enumerate(tree.pos()):
                     if i == leavenr:
                         nodePosition = tree.leaf_treeposition(i)
                         pn = utils.climb_tree(tree, nodePosition, labels)
-                        # taking a guess here, which is that inside the parent, the connective appears only once (taking its first index below)... this bit is not guaranteed to be correct
+                        # taking a guess here, which is that inside the
+                        parent, the connective appears only once (taking
+                        its first index below)... this bit is not
+                        guaranteed to be correct
                         parent_tokens = [x[0] for x in pn.pos()]
                         ind = parent_tokens.index(refcon.token)
                         temparg = []
                         for i6, node in enumerate(pn.pos()):
                             if i6 > ind:
                                 temparg.append(refcon.tokenId + (i6 - ind))
-                                    
+
             elif samesentpos[0] == -1: # extarg is predicted before (ref)conn
                 labels = ['S', 'CS', 'VP']
                 for i, node in enumerate(tree.pos()):
@@ -150,33 +183,45 @@ class ExplicitArgumentExtractor:
                             if i5 < ind:
                                 temparg.append(refcon.tokenId - (ind-i5))
 
-            # adding final punctuation here if it's not part of arg (but the only trailing char in the sentence) (Mind indentation level here: only do this for same sentence cases)
-            #assert refcon.fullSentence == ' '.join([x.token for x in sents[refcon.sentenceId]])
+            # adding final punctuation here if it's not part of arg (
+            but the only trailing char in the sentence) (Mind
+            indentation level here: only do this for same sentence cases)
+            # assert refcon.fullSentence == ' '.join([x.token for x
+                in sents[refcon.sentenceId]])
             if sents[refcon.sentenceId][-1].token in string.punctuation:
                 temparg.append(sents[refcon.sentenceId][-1].tokenId)
-        """
+        '''
 
-        # in PCC, extarg is what comes before second item for discont conns. Guess this is a relatively arbitrary decision. Hardcoding a fix here:
+        # in PCC, extarg is what comes before second item for discont conns.
+        # Guess this is a relatively arbitrary decision. Hardcoding a fix here:
         if not utils.iscontinuous([x.tokenId for x in rel.connective]):
-            temparg = [x for x in range(rel.connective[0].tokenId, rel.connective[-1].tokenId)]
+            temparg = [x for x in range(
+                rel.connective[0].tokenId, rel.connective[-1].tokenId)]
 
         # filtering out connective tokens
-        temparg = [x for x in temparg if not x in [y.tokenId for y in rel.connective]]
-
+        temparg = [x for x in temparg if x not in [y.tokenId for y
+                                                   in rel.connective]]
 
         return temparg
-            
 
-    
-    def train(self, trainfiles=[]): # second arg is to use only train filtes in cross-evaluation setup (empty by default)
-
+    def train(self, trainfiles=[]):
+        # second arg is to use only train filtes in cross-evaluation setup
+        # (empty by default)
         start = time.time()
-        sys.stderr.write('INFO: Starting training of explicit argument extractor...\n') # actually, the only thing being trained is/are the position classifiers, since the rest is rule-based
+        # actually, the only thing being trained is/are the position
+        # classifiers, since the rest is rule-based
+        sys.stderr.write(
+            'INFO: Starting training of explicit argument extractor...\n')
 
-        connectivefiles = [x for x  in utils.listfolder(os.path.join(self.config['PCC']['pccdir'], 'connectives')) if re.search('/maz-\d+.xml', x)] # filtering out temp/hidden files that may be there
-        syntaxfiles = [x for x  in utils.listfolder(os.path.join(self.config['PCC']['pccdir'], 'syntax')) if re.search('/maz-\d+.xml', x)]
+        connectivefiles = [x for x in utils.listfolder(
+            os.path.join(self.config['PCC']['pccdir'], 'connectives'))
+            # filtering out temp/hidden files that may be there
+            if re.search(r'maz-\d+.xml', x)]
+        syntaxfiles = [x for x in utils.listfolder(
+            os.path.join(self.config['PCC']['pccdir'], 'syntax'))
+            if re.search(r'maz-\d+.xml', x)]
 
-        fd = defaultdict(lambda : defaultdict(str))
+        fd = defaultdict(lambda: defaultdict(str))
         fd = utils.addAnnotationLayerToDict(connectivefiles, fd, 'connectives')
         fd = utils.addAnnotationLayerToDict(syntaxfiles, fd, 'syntax')
 
@@ -187,39 +232,49 @@ class ExplicitArgumentExtractor:
 
         # filtering out test files if a list of train fileids is specified
         if trainfiles:
-            fd = {f:fd[f] for f in fd if f in trainfiles}
-
+            fd = {f: fd[f] for f in fd if f in trainfiles}
         for f in fd:
-            pccTokens, relations = PCCParser.parseConnectorFile(fd[f]['connectives'])
+            pccTokens, relations = PCCParser.parseConnectorFile(
+                fd[f]['connectives'])
             pccTokens = PCCParser.parseSyntaxFile(fd[f]['syntax'], pccTokens)
             for rel in relations:
                 if rel.relationType == 'explicit':
-                    connective = ' '.join([x.token for x in rel.connectiveTokens])
+                    connective = ' '.join(
+                        [x.token for x in rel.connectiveTokens])
                     refcon = rel.connectiveTokens[0]
                     sentence = refcon.fullSentence
                     ptree = None
                     if sentence in self.parsermap:
                         ptree = self.parsermap[sentence]
                     else:
-                        tree = self.lexparser.parse(re.sub('\)', ']', re.sub('\(', '[', sentence)).split())
-                        ptreeiter = ParentedTree.convert(tree)
-                        for t in ptreeiter:
-                            ptree = t
-                            self.parsermap[sentence] = ptree
-                            break # always taking the first, assuming that this is the best scoring tree.
+                        sent = sentence.replace('(', '[')
+                        sent = sent.replace(')', ']')
+                        doc = self.nlp(sent)
+                        ptree = Tree.fromstring(str(
+                            doc.sentences[0].constituency))
+                        self.parsermap[sentence] = ptree
                     ptree = ParentedTree.convert(ptree)
                     postag = ptree.pos()[refcon.sentencePosition][1]
-                    ln = 'SOS' if refcon.sentencePosition == 0 else ptree.pos()[refcon.sentencePosition-1][0]
-                    rn = 'EOS' if refcon.sentencePosition == len(ptree.pos()) else ptree.pos()[refcon.sentencePosition+1][0]
-                    lnpos = 'SOS' if refcon.sentencePosition == 0 else ptree.pos()[refcon.sentencePosition-1][1]
-                    rnpos = 'EOS' if refcon.sentencePosition == len(ptree.pos()) else ptree.pos()[refcon.sentencePosition+1][1]
-                    nodePosition = ptree.leaf_treeposition(refcon.sentencePosition)
+                    ln = 'SOS' if refcon.sentencePosition == 0\
+                        else ptree.pos()[refcon.sentencePosition-1][0]
+                    rn = 'EOS' if refcon.sentencePosition == len(ptree.pos())\
+                        else ptree.pos()[refcon.sentencePosition+1][0]
+                    lnpos = 'SOS' if refcon.sentencePosition == 0\
+                        else ptree.pos()[refcon.sentencePosition-1][1]
+                    rnpos = 'EOS' if refcon.sentencePosition == len(
+                        ptree.pos())\
+                        else ptree.pos()[refcon.sentencePosition+1][1]
+                    nodePosition = ptree.leaf_treeposition(
+                        refcon.sentencePosition)
                     parent = ptree[nodePosition[:-1]].parent()
                     rootroute = utils.getPathToRoot(parent, [])
-                    #feat = [connective, postag, ln, rn, lnpos, rnpos, '-'.join(rootroute), refcon.sentencePosition]
-                    feat = [connective, postag, ln, rn, lnpos, rnpos, '-'.join(rootroute), refcon.sentencePosition]
+                    feat = [connective, postag, ln, rn, lnpos, rnpos,
+                            '-'.join(rootroute), refcon.sentencePosition]
                     enc_feat = [self.encode(v) for v in feat]
-                    extargsent = list(set(t.sentenceId for t in rel.extArgTokens))[0] # taking first sent only in case ext arg is spread over multiple sentences
+                    # taking first sent only in case ext arg is spread
+                    # over multiple sentences
+                    extargsent = list(set(t.sentenceId for t
+                                          in rel.extArgTokens))[0]
                     sentposlabel = extargsent - refcon.sentenceId
                     X_train_pos.append(enc_feat)
                     y_train_pos.append(sentposlabel)
@@ -230,28 +285,29 @@ class ExplicitArgumentExtractor:
                         else:
                             y_train_samesent.append(1)
 
-
-                
-        self.sentposclf = RandomForestClassifier(class_weight='balanced', n_estimators=1000)
-        self.samesentclf = RandomForestClassifier(class_weight='balanced', n_estimators=1000)
+        self.sentposclf = RandomForestClassifier(class_weight='balanced',
+                                                 n_estimators=1000,
+                                                 random_state=42)
+        self.samesentclf = RandomForestClassifier(class_weight='balanced',
+                                                  n_estimators=1000,
+                                                  random_state=42)
 
         self.sentposclf.fit(X_train_pos, y_train_pos)
         self.samesentclf.fit(X_train_samesent, y_train_samesent)
-        """
-        import numpy
-        from sklearn.model_selection import cross_val_score
-        print('sentpos avg acc:', numpy.mean(cross_val_score(self.sentposclf, X_train_pos, y_train_pos, cv=10)))
-        print('samesent avg acc:', numpy.mean(cross_val_score(self.samesentclf, X_train_samesent, y_train_samesent, cv=10)))
-        """
+
         end = time.time()
         hours, rem = divmod(end-start, 3600)
         minutes, seconds = divmod(rem, 60)
-        sys.stderr.write('INFO: Done training explicit argument extractor...({:0>2}:{:0>2}:{:0>2})\n'.format(int(hours), int(minutes), int(seconds)))
+        sys.stderr.write(
+            'INFO: Done training explicit argument extractor'
+            '...({:0>2}:{:0>2}:{:0>2})\n'.format(int(hours), int(minutes),
+                                                 int(seconds)))
 
-        #pickle.dump(self.sentposclf, codecs.open('sentposclf.pickle', 'wb'))
-        #pickle.dump(self.samesentclf, codecs.open('samesentclf.pickle', 'wb'))
-        #sys.stderr.write('INFO: Saved classifier to sentposclf.pickle.\n')
-        #sys.stderr.write('INFO: Saved classifier to samesentclf.pickle.\n')
+        # pickle.dump(self.sentposclf, codecs.open('sentposclf.pickle', 'wb'))
+        # pickle.dump(self.samesentclf, codecs.open('samesentclf.pickle', 'wb')
+        # )
+        # sys.stderr.write('INFO: Saved classifier to sentposclf.pickle.\n')
+        # sys.stderr.write('INFO: Saved classifier to samesentclf.pickle.\n')
 
     def load(self):
 
@@ -262,22 +318,27 @@ class ExplicitArgumentExtractor:
 
         self.sentposclf = pickle.load(codecs.open('sentposclf.pickle', 'rb'))
         self.samesentclf = pickle.load(codecs.open('samesentclf.pickle', 'rb'))
-        
 
     def getGoldArgs(self, testfiles):
 
-        connectivefiles = [x for x  in utils.listfolder(os.path.join(self.config['PCC']['pccdir'], 'connectives')) if re.search('/maz-\d+.xml', x)] # filtering out temp/hidden files that may be there
-        syntaxfiles = [x for x  in utils.listfolder(os.path.join(self.config['PCC']['pccdir'], 'syntax')) if re.search('/maz-\d+.xml', x)]
+        connectivefiles = [x for x in utils.listfolder(
+            os.path.join(self.config['PCC']['pccdir'], 'connectives'))
+            # filtering out temp/hidden files that may be there
+            if re.search(r'maz-\d+.xml', x)]
+        syntaxfiles = [x for x in utils.listfolder(
+            os.path.join(self.config['PCC']['pccdir'], 'syntax'))
+            if re.search(r'maz-\d+.xml', x)]
 
-        fd = defaultdict(lambda : defaultdict(str))
+        fd = defaultdict(lambda: defaultdict(str))
         fd = utils.addAnnotationLayerToDict(connectivefiles, fd, 'connectives')
         fd = utils.addAnnotationLayerToDict(syntaxfiles, fd, 'syntax')
 
         # taking test files only
-        fd = {f:fd[f] for f in fd if f in testfiles}
+        fd = {f: fd[f] for f in fd if f in testfiles}
         goldrels = []
         for f in fd:
-            pccTokens, relations = PCCParser.parseConnectorFile(fd[f]['connectives'])
+            pccTokens, relations = PCCParser.parseConnectorFile(
+                fd[f]['connectives'])
             pccTokens = PCCParser.parseSyntaxFile(fd[f]['syntax'], pccTokens)
             for rel in relations:
                 if rel.relationType == 'explicit':
@@ -286,31 +347,35 @@ class ExplicitArgumentExtractor:
 
     def evaluate_gold(self, testfiles, f2gold):
 
-        intarg_tp, intarg_fp, intarg_fn, extarg_tp, extarg_fp, extarg_fn = 0,0,0,0,0,0
+        intarg_tp, intarg_fp, intarg_fn, extarg_tp, extarg_fp, extarg_fn =\
+            0, 0, 0, 0, 0, 0
         for f in f2gold:
             if f in testfiles:
                 relations, sents, tokens = f2gold[f]
                 for rel in relations:
                     if rel.relationType == 'explicit':
-                        connective = ' '.join([x.token for x in rel.connective])
                         refcon = rel.connective[0]
                         sentence = refcon.fullSentence
                         ptree = None
                         if sentence in self.parsermap:
-                            ptree = ParentedTree.convert(self.parsermap[sentence])
+                            ptree = ParentedTree.convert(
+                                self.parsermap[sentence])
                         else:
-                            tree = self.lexparser.parse(re.sub('\)', ']', re.sub('\(', '[', sentence)).split())
-                            ptreeiter = ParentedTree.convert(tree)
-                            for t in ptreeiter:
-                                ptree = t
-                                self.parsermap[sentence] = ptree
-                                break # always taking the first, assuming that this is the best scoring tree.
+                            sent = sentence.replace('(', '[')
+                            sent = sent.replace(')', ']')
+                            doc = self.nlp(sent)
+                            ptree = Tree.fromstring(str(
+                                doc.sentences[0].constituency))
+                            self.parsermap[sentence] = ptree
 
                         tempextarg = self.getExtArg(ptree, rel, tokens, sents)
                         tempintarg = self.getIntArg(ptree, rel, tokens)
-                        # since generally, intarg tokens are easier to predict than extarg tokens, filtering out any intarg tokens that may be in the extarg list
+                        # since generally, intarg tokens are easier to
+                        # predict than extarg tokens, filtering out any
+                        # intarg tokens that may be in the extarg list
                         pred_intarg = tempintarg
-                        pred_extarg = [x for x in tempextarg if not x in tempintarg]
+                        pred_extarg = [x for x in tempextarg
+                                       if x not in tempintarg]
 
                         gold_intarg = rel.arg2
                         gold_extarg = rel.arg1
@@ -318,7 +383,6 @@ class ExplicitArgumentExtractor:
                         gold_intarg = [x.tokenId for x in gold_intarg]
                         gold_extarg = [x.tokenId for x in gold_extarg]
                         for tid in set(gold_intarg + pred_intarg):
-                            #if not tokens[int(tid)].token in string.punctuation:
                             if tid in gold_intarg and tid in pred_intarg:
                                 intarg_tp += 1
                             elif tid in gold_intarg:
@@ -326,7 +390,6 @@ class ExplicitArgumentExtractor:
                             elif tid in pred_intarg:
                                 intarg_fp += 1
                         for tid in set(gold_extarg + pred_extarg):
-                            #if not tokens[int(tid)].token in string.punctuation:
                             if tid in gold_extarg and tid in pred_extarg:
                                 extarg_tp += 1
                             elif tid in gold_extarg:
@@ -335,8 +398,7 @@ class ExplicitArgumentExtractor:
                                 extarg_fp += 1
 
         return intarg_tp, intarg_fp, intarg_fn, extarg_tp, extarg_fp, extarg_fn
-                        
-                    
+
     def evaluate_pred(self, pred_relations, gold_relations):
 
         intarg_tp = 0
@@ -370,38 +432,37 @@ class ExplicitArgumentExtractor:
                             extarg_fn += 1
                         elif tid in prel_extarg:
                             extarg_fp += 1
-            if not found: # count all tokens as false negatives
+            if not found:  # count all tokens as false negatives
                 for tid in grel_intarg:
                     intarg_fn += 1
                 for tid in grel_extarg:
                     extarg_fn += 1
 
         return intarg_tp, intarg_fp, intarg_fn, extarg_tp, extarg_fp, extarg_fn
-                    
+
     def predict(self, relations, sents, tokens):
 
         for rel in relations:
-            connective = ' '.join([x.token for x in rel.connective])
             refcon = rel.connective[0]
             sentence = refcon.fullSentence
-            tree = self.lexparser.parse(re.sub('\)', ']', re.sub('\(', '[', sentence)).split())
-            ptreeiter = ParentedTree.convert(tree)
-            for t in ptreeiter:
-                ptree = t
-                break # always taking the first, assuming that this is the best scoring tree.
+            sent = sentence.replace('(', '[')
+            sent = sent.replace(')', ']')
+            doc = self.nlp(sent)
+            ptree = Tree.fromstring(str(
+                doc.sentences[0].constituency))
+            self.parsermap[sentence] = ptree
             ptree = ParentedTree.convert(ptree)
 
-
-            
             tempextarg = self.getExtArg(ptree, rel, tokens, sents)
             tempintarg = self.getIntArg(ptree, rel, tokens)
 
-            # since generally, intarg tokens are easier to predict than extarg tokens, filtering out any intarg tokens that may be in the extarg list
+            # since generally, intarg tokens are easier to predict than
+            # extarg tokens, filtering out any intarg tokens that may be
+            # in the extarg list
             intarg = tempintarg
-            extarg = [x for x in tempextarg if not x in tempintarg]
+            extarg = [x for x in tempextarg if x not in tempintarg]
 
             for iat in intarg:
                 rel.addIntArgToken(tokens[iat])
             for eat in extarg:
                 rel.addExtArgToken(tokens[eat])
-

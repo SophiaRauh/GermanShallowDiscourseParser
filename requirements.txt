@@ -1,12 +1,12 @@
-tensorflow==1.13.1
-bert-serving-server==1.10.0
-bert-serving-client==1.10.0
-scikit-learn==0.22.2.post1
-nltk==3.5
-spacy==2.0.9
-flask==2.0.3
-flask_cors==3.0.7
-lxml==4.6.2
-dill==0.2.9
-waitress==1.4.4
-protobuf==3.20.*
+dill==0.3.7
+Flask==2.2.5
+Flask_Cors==4.0.0
+lxml==4.9.3
+nltk==3.8.1
+numpy==1.23.5
+scikit_learn==1.4.1.post1
+sentence_transformers==2.5.1
+spacy==3.3.1
+stanza==1.8.1
+tqdm==4.65.0
+Python 3.11
