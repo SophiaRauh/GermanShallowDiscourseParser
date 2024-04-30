@@ -9,6 +9,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+import configparser
 
 import numpy
 from flask import Flask
@@ -309,8 +310,10 @@ def gold_eval(pcc_folder, files, numIterations, splits):
 
 
 def evaluate():
-
-    files = os.listdir('pcc2.2/connectives/')
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+    pcc_connectives_dir = os.path.join(config['PCC']['pccdir'], 'connectives')
+    files = os.listdir(pcc_connectives_dir)
     numIterations = 2  # 10
     splits = utils.getDataSplits(numIterations, len(files))
 

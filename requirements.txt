@@ -4,9 +4,15 @@ Flask_Cors==4.0.0
 lxml==4.9.3
 nltk==3.8.1
 numpy==1.23.5
+peft==0.10.0
+pydantic==1.10.15
 scikit_learn==1.4.1.post1
 sentence_transformers==2.5.1
-spacy==3.3.1
+spacy-legacy==3.0.12
+spacy-loggers==1.0.5
+spacy==3.7.4
 stanza==1.8.1
+thinc==8.2.2
 tqdm==4.65.0
-Python 3.11
+#Python 3.11
+#python -m nltk.downloader punkt
